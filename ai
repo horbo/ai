@@ -1,39 +1,365 @@
 #!/usr/bin/env bash
-#
-# ai - generuje komende bash na podstawie promptu uzytkownika (model haiku).
-# Wypisuje SAMA komende na stdout, nie uruchamia jej. Owijka w .zshrc (funkcja
-# `ai`) wstawia ja do bufora edycji zsh przez `print -z`, gdzie mozesz ja
-# przejrzec, edytowac i uruchomic Enterem.
-
 set -euo pipefail
 
-# Zbierz input uzytkownika z argumentow lub interaktywnie.
-if [[ $# -gt 0 ]]; then
-    input="$*"
+VERSION="0.2.0"
+RC_BEGIN="# >>> ai >>>"
+RC_END="# <<< ai <<<"
+
+: "${AI_MODEL:=haiku}"
+: "${AI_FALLBACK_MODEL:=sonnet}"
+: "${AI_CONTEXT:=os,shell,tools,cwd}"
+: "${AI_MAX_BUDGET_USD:=}"
+: "${AI_BIN_DIR:=${XDG_BIN_HOME:-$HOME/.local/bin}}"
+: "${AI_RC_FILE:=}"
+: "${AI_NO_RC:=0}"
+
+SYSTEM_PROMPT="You turn a natural-language request into a shell command.
+
+Return exactly one ready-to-run command in the 'command' field. Prefer a reasonable
+default over asking. When the request is too vague to guess safely, leave 'command'
+empty and put one short clarifying question in 'question' instead. Never fill both.
+
+Set 'danger' to true when the command deletes, overwrites, or is otherwise
+irreversible. Keep 'explanation' to a single sentence.
+
+The request may be preceded by an <environment> block describing the user's system.
+Prefer commands that work there. Write 'explanation' and 'question' in the same
+language as the request.
+
+You never execute anything: the user reviews the command and runs it."
+
+SCHEMA='{
+  "type": "object",
+  "properties": {
+    "command":     {"type": "string",  "description": "A single ready-to-run shell command, no prose, no markdown"},
+    "explanation": {"type": "string",  "description": "One sentence describing what the command does"},
+    "question":    {"type": "string",  "description": "Instead of a command: one short clarifying question when the request is too vague"},
+    "danger":      {"type": "boolean", "description": "true when the command deletes, overwrites or is otherwise irreversible"}
+  },
+  "additionalProperties": false
+}'
+
+log() { printf 'ai: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+
+usage() {
+    cat >&2 <<'USAGE'
+Usage: ai [options] <request>...
+       ai [options]                interactive prompt
+       ... | ai [options]          request on stdin
+       ai init zsh|bash            print the shell wrapper
+       ai --update                 update the installation
+
+Options:
+  -m, --model <name>   model to use (default: haiku)
+  -e, --explain        print a one-line explanation on stderr
+      --no-context     do not send environment details to the model
+      --link           re-create the symlink and shell rc entry
+      --no-rc          with --link/--update, leave the shell rc file alone
+  -h, --help           show this help
+  -V, --version        show the version
+
+Only the generated command is written to stdout; everything else goes to stderr.
+
+Exit codes:
+  0  command on stdout
+  1  usage error or missing dependency
+  2  the model needs a clarification (question on stderr)
+  3  the claude CLI failed
+
+Environment:
+  AI_MODEL, AI_FALLBACK_MODEL, AI_CONTEXT, AI_MAX_BUDGET_USD,
+  AI_BIN_DIR, AI_RC_FILE
+USAGE
+}
+
+resolve_self() {
+    local path=$1 dir
+    while [[ -L $path ]]; do
+        dir=$(cd -P "$(dirname "$path")" && pwd)
+        path=$(readlink "$path")
+        [[ $path != /* ]] && path=$dir/$path
+    done
+    printf '%s/%s\n' "$(cd -P "$(dirname "$path")" && pwd)" "$(basename "$path")"
+}
+
+repo_dir() { dirname "$(resolve_self "$0")"; }
+
+current_shell() {
+    local shell=${AI_SHELL:-${SHELL:-}}
+    printf '%s\n' "${shell##*/}"
+}
+
+default_rc_file() {
+    case "$(current_shell)" in
+        zsh) printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" ;;
+        bash)
+            if [[ ! -f $HOME/.bashrc && -f $HOME/.bash_profile ]]; then
+                printf '%s\n' "$HOME/.bash_profile"
+            else
+                printf '%s\n' "$HOME/.bashrc"
+            fi ;;
+        *) return 1 ;;
+    esac
+}
+
+init_snippet() {
+    case $1 in
+        zsh)
+            cat <<'SNIPPET'
+ai() {
+  local cmd
+  cmd="$(AI_SHELL=zsh command ai "$@")" || return
+  [[ -n "$cmd" ]] && print -rz -- "$cmd"
+}
+SNIPPET
+            ;;
+        bash)
+            cat <<'SNIPPET'
+ai() {
+  local generated edited
+  generated="$(AI_SHELL=bash command ai "$@")" || return
+  [[ -n "$generated" ]] || return
+  history -s -- "$generated"
+  read -e -i "$generated" -r -p '$ ' edited || return
+  [[ -n "$edited" ]] && eval -- "$edited"
+}
+SNIPPET
+            ;;
+        *) die "unsupported shell: $1 (expected zsh or bash)" ;;
+    esac
+}
+
+link_binary() {
+    local target=$1 link="$AI_BIN_DIR/ai"
+    if [[ -L $link && $(readlink "$link") == "$target" ]]; then
+        log "symlink $link ok"
+        return 0
+    fi
+    [[ -e $link && ! -L $link ]] && die "$link exists and is not a symlink"
+    mkdir -p "$AI_BIN_DIR"
+    ln -sfn "$target" "$link"
+    log "symlink $link -> $target"
+}
+
+rc_block() {
+    printf '%s\neval "$(ai init %s)"\n%s\n' "$RC_BEGIN" "$(current_shell)" "$RC_END"
+}
+
+ensure_rc_block() {
+    local rc=$1 block tmp
+    block=$(rc_block)
+    if [[ -f $rc ]] && grep -qxF "$RC_BEGIN" "$rc"; then
+        tmp=$(mktemp)
+        awk -v begin="$RC_BEGIN" -v end="$RC_END" -v block="$block" '
+            $0 == begin { printf "%s", block; skip = 1; next }
+            $0 == end   { skip = 0; next }
+            !skip       { print }
+        ' "$rc" >"$tmp"
+        if cmp -s "$tmp" "$rc"; then
+            log "rc entry in $rc ok"
+        else
+            cat "$tmp" >"$rc"
+            log "rc entry in $rc updated"
+        fi
+        rm -f "$tmp"
+    else
+        [[ -f $rc ]] || : >"$rc"
+        printf '\n%s' "$block" >>"$rc"
+        log "rc entry added to $rc"
+    fi
+}
+
+warn_about_path() {
+    case ":${PATH}:" in
+        *":$AI_BIN_DIR:"*) ;;
+        *)
+            log "warning: $AI_BIN_DIR is not in PATH"
+            log "  add: export PATH=\"$AI_BIN_DIR:\$PATH\""
+            ;;
+    esac
+}
+
+cmd_link() {
+    link_binary "$(repo_dir)/ai"
+    if [[ $AI_NO_RC != 1 ]]; then
+        local rc=$AI_RC_FILE
+        if [[ -z $rc ]] && ! rc=$(default_rc_file); then
+            log "unknown shell, add this to your shell config manually:"
+            rc_block >&2
+            rc=""
+        fi
+        [[ -n $rc ]] && ensure_rc_block "$rc"
+    fi
+    warn_about_path
+}
+
+file_version() { sed -n 's/^VERSION="\(.*\)"$/\1/p' "$1" | head -n 1; }
+
+cmd_update() {
+    local dir before after count new_version
+    command -v git >/dev/null 2>&1 || die "git is required for --update"
+    dir=$(repo_dir)
+    git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 ||
+        die "not a git checkout: $dir (reinstall with install.sh)"
+
+    log "updating $dir"
+    before=$(git -C "$dir" rev-parse HEAD)
+    git -C "$dir" pull --ff-only >&2 ||
+        die "git pull failed (local changes or diverged history?)"
+    after=$(git -C "$dir" rev-parse HEAD)
+
+    if [[ $before == "$after" ]]; then
+        log "already up to date ($VERSION)"
+    else
+        new_version=$(file_version "$dir/ai")
+        count=$(git -C "$dir" rev-list --count "$before..$after")
+        log "$VERSION -> $new_version ($count commit(s))"
+    fi
+    cmd_link
+}
+
+context_wants() {
+    case ",$AI_CONTEXT," in
+        *",$1,"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+build_context() {
+    local parts=() os listing tool found=()
+    [[ -z $AI_CONTEXT || $AI_CONTEXT == none ]] && return 0
+
+    if context_wants os; then
+        os=""
+        [[ -r /etc/os-release ]] &&
+            os=$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-${NAME:-}}")
+        [[ -n $os ]] || os=$(uname -sr)
+        parts+=("OS: $os")
+    fi
+
+    if context_wants shell; then
+        parts+=("Shell: $(current_shell)")
+    fi
+
+    if context_wants tools; then
+        for tool in fd rg jq eza bat fzf gh git docker podman systemctl dnf apt pacman brew; do
+            command -v "$tool" >/dev/null 2>&1 && found+=("$tool")
+        done
+        [[ ${#found[@]} -gt 0 ]] && parts+=("Available tools: ${found[*]}")
+    fi
+
+    if context_wants cwd; then
+        parts+=("Working directory: $PWD")
+        listing=$(ls -A 2>/dev/null | head -n 40 | tr '\n' ' ')
+        [[ -n $listing ]] && parts+=("Files here: $listing")
+    fi
+
+    [[ ${#parts[@]} -gt 0 ]] && printf '%s\n' "${parts[@]}"
+    return 0
+}
+
+strip_fences() {
+    sed -e '/^[[:space:]]*```/d' \
+        -e '/./,$!d' \
+        -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
+}
+
+run_claude() {
+    local args=(
+        --model "$AI_MODEL"
+        --fallback-model "$AI_FALLBACK_MODEL"
+        --system-prompt "$SYSTEM_PROMPT"
+        --json-schema "$SCHEMA"
+        --output-format json
+        --tools ""
+        --permission-mode dontAsk
+        --permission-prompts none
+        --setting-sources ""
+        --strict-mcp-config
+        --no-session-persistence
+    )
+    [[ -n $AI_MAX_BUDGET_USD ]] && args+=(--max-budget-usd "$AI_MAX_BUDGET_USD")
+    claude "${args[@]}" -p "$1"
+}
+
+explain=0
+prompt_args=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage; exit 0 ;;
+        -V|--version) log "version $VERSION"; exit 0 ;;
+        -m|--model) [[ $# -ge 2 ]] || die "--model requires a value"; AI_MODEL=$2; shift 2 ;;
+        -e|--explain) explain=1; shift ;;
+        --no-context) AI_CONTEXT=none; shift ;;
+        --no-rc) AI_NO_RC=1; shift ;;
+        --link) cmd_link; exit 0 ;;
+        --update) cmd_update; exit 0 ;;
+        init) shift; [[ $# -ge 1 ]] || die "init requires a shell name (zsh or bash)"; init_snippet "$1"; exit 0 ;;
+        --) shift; prompt_args=("$@"); break ;;
+        -*) die "unknown option: $1" ;;
+        *) prompt_args=("$@"); break ;;
+    esac
+done
+
+if [[ ${#prompt_args[@]} -gt 0 ]]; then
+    input="${prompt_args[*]}"
+elif [[ ! -t 0 ]]; then
+    input=$(cat)
 else
-    read -r -p "Co chcesz zrobic? " input
+    printf 'What do you want to do? ' >&2
+    IFS= read -r input || die "no request given"
 fi
 
-if [[ -z "${input// }" ]]; then
-    echo "Brak promptu." >&2
-    exit 1
+[[ -n ${input//[[:space:]]/} ]] || die "no request given"
+
+command -v claude >/dev/null 2>&1 || die "claude not found in PATH (see https://claude.ai/code)"
+command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
+
+context=$(build_context)
+if [[ -n $context ]]; then
+    input=$(printf '<environment>\n%s\n</environment>\n\n%s\n' "$context" "$input")
 fi
 
-system_prompt="Jestes generatorem komend bash. Na podstawie promptu uzytkownika zwracasz JEDNA gotowa komende do uruchomienia. Odpowiadasz wylacznie sama komenda - zadnego dodatkowego tekstu, komentarzy, wyjasnien ani pytan. Nie zadawaj pytan doprecyzowujacych - jesli czegos brakuje, przyjmij rozsadne zalozenie. Nie opakowuj komendy w markdown ani backticki. Nie uruchamiasz zadnych komend samodzielnie - tylko je generujesz, wiec nie potrzebujesz zadnych uprawnien ani narzedzi; komende wykona uzytkownik."
+status=0
+response=$(run_claude "$input") || status=$?
 
-# Zapytaj Claude o komende.
-command_output="$(claude --model haiku --system-prompt "${system_prompt}" -p "${input}")"
-
-# Usun ewentualne opakowanie w markdown (``` lub ```bash), gdyby model je dodal.
-# Wycina linie zaczynajace sie od ``` oraz puste linie z poczatku i konca.
-command_output="$(printf '%s\n' "${command_output}" \
-    | sed -e '/^[[:space:]]*```/d' \
-    | sed -e '/./,$!d' -e ':a' -e '/^\n*$/{$d;N;ba' -e '}')"
-
-if [[ -z "${command_output// }" ]]; then
-    echo "Claude nie zwrocil zadnej komendy." >&2
-    exit 1
+if [[ -z $response ]] || ! jq -e . >/dev/null 2>&1 <<<"$response"; then
+    log "unexpected output from claude:"
+    [[ -n $response ]] && printf '%s\n' "$response" >&2
+    exit 3
 fi
 
-# Wypisz sama komende na stdout - reszte (wstawienie do terminala) robi owijka w .zshrc.
-printf '%s\n' "${command_output}"
+if [[ $(jq -r '.is_error // false' <<<"$response") == true ]]; then
+    log "claude failed: $(jq -r '.result // "unknown error"' <<<"$response")"
+    exit 3
+fi
+
+if [[ $status -ne 0 ]]; then
+    log "claude exited with status $status"
+    exit 3
+fi
+
+question=$(jq -r '.structured_output.question // ""' <<<"$response")
+if [[ -n ${question//[[:space:]]/} ]]; then
+    printf '%s\n' "$question" >&2
+    exit 2
+fi
+
+generated=$(jq -r '.structured_output.command // ""' <<<"$response" | strip_fences)
+if [[ -z ${generated//[[:space:]]/} ]]; then
+    log "no command in response"
+    exit 3
+fi
+
+if [[ $(jq -r '.structured_output.danger // false' <<<"$response") == true ]]; then
+    log "warning: irreversible command, read it before running"
+fi
+
+if [[ $explain -eq 1 ]]; then
+    explanation=$(jq -r '.structured_output.explanation // ""' <<<"$response")
+    [[ -n $explanation ]] && printf '%s\n' "$explanation" >&2
+fi
+
+printf '%s\n' "$generated"

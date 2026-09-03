@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${STUB_CASE:-ok}" in
+    ok)       output='{"command":"find . -type f -size +100M","explanation":"Lists files over 100MB.","danger":false}' ;;
+    danger)   output='{"command":"rm -rf ./build","explanation":"Deletes the build directory.","danger":true}' ;;
+    question) output='{"question":"Which directory should I search?"}' ;;
+    fenced)   output='{"command":"```bash\nls -la\n```"}' ;;
+    empty)    output='{}' ;;
+    api_error)
+        printf '%s\n' '{"is_error":true,"result":"Not logged in · Please run /login","subtype":"success"}'
+        exit 1 ;;
+    garbage)
+        printf '%s\n' 'Not logged in · Please run /login'
+        exit 1 ;;
+    *) printf 'stub: unknown STUB_CASE\n' >&2; exit 1 ;;
+esac
+
+jq -nc --argjson so "$output" '{is_error:false, result:($so|tostring), structured_output:$so}'
