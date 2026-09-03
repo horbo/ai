@@ -184,12 +184,14 @@ rc_block() {
 }
 
 ensure_rc_block() {
-    local rc=$1 block tmp
+    local rc=$1 block tmp blockfile
     block=$(rc_block)
     if [[ -f $rc ]] && grep -qxF "$RC_BEGIN" "$rc"; then
         tmp=$(mktemp)
-        awk -v begin="$RC_BEGIN" -v end="$RC_END" -v block="$block" '
-            $0 == begin { printf "%s", block; skip = 1; next }
+        blockfile=$(mktemp)
+        printf '%s\n' "$block" >"$blockfile"
+        awk -v begin="$RC_BEGIN" -v end="$RC_END" -v blockfile="$blockfile" '
+            $0 == begin { while ((getline line < blockfile) > 0) print line; skip = 1; next }
             $0 == end   { skip = 0; next }
             !skip       { print }
         ' "$rc" >"$tmp"
@@ -199,10 +201,10 @@ ensure_rc_block() {
             cat "$tmp" >"$rc"
             log "rc entry in $rc updated"
         fi
-        rm -f "$tmp"
+        rm -f "$tmp" "$blockfile"
     else
         [[ -f $rc ]] || : >"$rc"
-        printf '\n%s' "$block" >>"$rc"
+        printf '\n%s\n' "$block" >>"$rc"
         log "rc entry added to $rc"
     fi
 }
