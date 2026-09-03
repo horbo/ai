@@ -32,6 +32,12 @@ ktora w zsh wklada wynik do bufora edycji przez `print -z`. Ten podzial jest
 kluczowy - nie dodawaj do skryptu wykonywania (`eval`, `bash -c`) wygenerowanej
 komendy.
 
+`init_snippet` emituje owijke **i** completion (zsh `_ai` + `compdef`, bash `_ai`
++ `complete`). Dodajac flage do parsera argumentow, dopisz ja w obu wariantach -
+testy sprawdzaja tylko kilka reprezentatywnych przypadkow, nie kompletnosc listy.
+W zsh `compdef` istnieje dopiero po `compinit`, stad guard `if (( $+functions[compdef] ))`;
+musi to byc `if`, a nie `&&`, zeby eval nie zostawial `$?` = 1.
+
 Niezmiennik, ktorego pilnuja testy: **na stdout nie trafia nic poza komenda**.
 Pomoc, wersja, wyjasnienia, ostrzezenia, pytania i bledy ida na stderr. Wyjatkiem
 jest `ai init`, ktorego wyjscie jest konsumowane przez `eval`.

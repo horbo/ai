@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 RC_BEGIN="# >>> ai >>>"
 RC_END="# <<< ai <<<"
 
@@ -112,6 +112,28 @@ ai() {
   cmd="$(AI_SHELL=zsh command ai "$@")" || return
   [[ -n "$cmd" ]] && print -rz -- "$cmd"
 }
+
+_ai() {
+  if (( CURRENT == 3 )) && [[ ${words[2]} == init ]]; then
+    _values 'shell' zsh bash
+    return
+  fi
+  _arguments -S \
+    '(-m --model)'{-m,--model}'[model to use]:model:(haiku sonnet opus fable)' \
+    '(-e --explain)'{-e,--explain}'[print a one-line explanation on stderr]' \
+    '--no-context[do not send environment details to the model]' \
+    '--link[re-create the symlink and shell rc entry]' \
+    '--no-rc[leave the shell rc file alone]' \
+    '--update[update the installation]' \
+    '(-h --help)'{-h,--help}'[show this help]' \
+    '(-V --version)'{-V,--version}'[show the version]' \
+    '1:request or subcommand:((init\:"print the shell wrapper"))' \
+    '*:request:'
+}
+
+if (( $+functions[compdef] )); then
+  compdef _ai ai
+fi
 SNIPPET
             ;;
         bash)
@@ -124,6 +146,21 @@ ai() {
   read -e -i "$generated" -r -p '$ ' edited || return
   [[ -n "$edited" ]] && eval -- "$edited"
 }
+
+_ai() {
+  local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
+  case $prev in
+    -m|--model) mapfile -t COMPREPLY < <(compgen -W 'haiku sonnet opus fable' -- "$cur"); return ;;
+    init) mapfile -t COMPREPLY < <(compgen -W 'zsh bash' -- "$cur"); return ;;
+  esac
+  if [[ $cur == -* ]]; then
+    mapfile -t COMPREPLY < <(compgen -W '-m --model -e --explain --no-context --link --no-rc --update -h --help -V --version' -- "$cur")
+  elif (( COMP_CWORD == 1 )); then
+    mapfile -t COMPREPLY < <(compgen -W 'init' -- "$cur")
+  fi
+}
+
+complete -F _ai ai
 SNIPPET
             ;;
         *) die "unsupported shell: $1 (expected zsh or bash)" ;;

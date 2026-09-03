@@ -90,6 +90,29 @@ ai -- --version                   # treat the rest as the request, not as flags
 
 `ai init zsh` and `ai init bash` print the wrapper if you want to wire it up yourself.
 
+## Completion
+
+Tab completion comes with the wrapper, so there is nothing extra to install:
+
+```console
+$ ai --<TAB>
+--explain     --link      --model     --no-context
+--no-rc       --update    --help      --version
+
+$ ai -m <TAB>
+haiku  sonnet  opus  fable
+
+$ ai init <TAB>
+zsh  bash
+```
+
+Free-text requests are left alone — completion only kicks in for flags and for
+`init`.
+
+In zsh the wrapper must be evaluated **after** `compinit`, which is where the
+installer puts it. If you wire it up by hand and put the `eval` earlier, the
+wrapper still works but completion is skipped.
+
 ## Output contract
 
 Only the generated command ever reaches stdout. Explanations, warnings, questions

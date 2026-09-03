@@ -98,6 +98,41 @@ check "init bash: parses" 0 "$?"
 "$root/ai" init fish >/dev/null 2>&1
 check "init fish: rejected" 1 "$?"
 
+printf 'completion\n'
+if command -v zsh >/dev/null 2>&1; then
+    out=$(cd "$root" && zsh -f -c '
+        autoload -Uz compinit
+        compinit -u -d "${TMPDIR:-/tmp}/ai-test-zcompdump-$$" >/dev/null 2>&1
+        eval "$(./ai init zsh)"
+        (( $+functions[_ai] )) && print -r -- "${_comps[ai]:-unregistered}"
+    ' 2>/dev/null)
+    check "zsh: completion registered" "_ai" "$out"
+
+    cd "$root" && zsh -f -c 'eval "$(./ai init zsh)"' >/dev/null 2>&1
+    check "zsh: clean status without compinit" 0 "$?"
+else
+    printf '  skip zsh completion (zsh not installed)\n'
+fi
+
+complete_bash() {
+    local words=$1 cword=$2
+    bash -c '
+        eval "$(./ai init bash)"
+        IFS=" " read -r -a COMP_WORDS <<<"$1"
+        [[ $1 == *" " ]] && COMP_WORDS+=("")
+        COMP_CWORD=$2
+        _ai
+        printf "%s\n" "${COMPREPLY[*]-}"
+    ' _ "$words" "$cword"
+}
+
+cd "$root" || exit 1
+check "bash: models after -m" "haiku sonnet opus fable" "$(complete_bash 'ai -m ' 2)"
+check "bash: flags for --no" "--no-context --no-rc" "$(complete_bash 'ai --no' 1)"
+check "bash: shells after init" "zsh bash" "$(complete_bash 'ai init ' 2)"
+check "bash: init as first word" "init" "$(complete_bash 'ai in' 1)"
+check "bash: free text not completed" "" "$(complete_bash 'ai find large ' 3)"
+
 printf 'installer\n'
 sandbox=$(mktemp -d)
 source_repo="$sandbox/source"
