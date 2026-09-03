@@ -114,7 +114,9 @@ init_snippet() {
 ai() {
   local cmd
   cmd="$(AI_SHELL=zsh command ai "$@")" || return
-  [[ -n "$cmd" ]] && print -rz -- "$cmd"
+  if [[ -n "$cmd" ]]; then
+    print -rz -- "$cmd"
+  fi
 }
 
 _ai() {
@@ -145,10 +147,14 @@ SNIPPET
 ai() {
   local generated edited
   generated="$(AI_SHELL=bash command ai "$@")" || return
-  [[ -n "$generated" ]] || return
+  if [[ -z "$generated" ]]; then
+    return 0
+  fi
   history -s -- "$generated"
   read -e -i "$generated" -r -p '$ ' edited || return
-  [[ -n "$edited" ]] && eval -- "$edited"
+  if [[ -n "$edited" ]]; then
+    eval -- "$edited"
+  fi
 }
 
 _ai() {

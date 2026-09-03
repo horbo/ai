@@ -106,6 +106,15 @@ rm -f "$snippet"
 "$root/ai" init fish >/dev/null 2>&1
 check "init fish: rejected" 1 "$?"
 
+if command -v zsh >/dev/null 2>&1; then
+    zsh -f -c "eval \"\$($root/ai init zsh)\"; ai -V" >/dev/null 2>&1
+    check "zsh wrapper: clean status without stdout" 0 "$?"
+else
+    printf '  skip zsh wrapper status (zsh not installed)\n'
+fi
+bash -c "eval \"\$($root/ai init bash)\"; ai -V" >/dev/null 2>&1
+check "bash wrapper: clean status without stdout" 0 "$?"
+
 printf 'completion\n'
 if command -v zsh >/dev/null 2>&1; then
     out=$(cd "$root" && zsh -f -c '
