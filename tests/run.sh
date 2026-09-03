@@ -28,7 +28,7 @@ for script in "$root/ai" "$root/install.sh" "$root/tests/run.sh" "$stub_dir/clau
 done
 
 if command -v shellcheck >/dev/null 2>&1; then
-    for script in "$root/ai" "$root/install.sh" "$stub_dir/claude"; do
+    for script in "$root/ai" "$root/install.sh" "$root/tests/run.sh" "$stub_dir/claude"; do
         if shellcheck -S warning "$script"; then pass "shellcheck $(basename "$script")"; else fail "shellcheck $script"; fi
     done
 else
@@ -62,17 +62,17 @@ err=$(run_ai ok -e list big files 2>&1 >/dev/null)
 check "explain: explanation on stderr" "Lists files over 100MB." "$err"
 
 for case_name in question empty api_error garbage; do
-    out=$(run_ai "$case_name" do something 2>/dev/null)
+    out=$(run_ai "$case_name" "do something" 2>/dev/null)
     check "$case_name: stdout empty" "" "$out"
 done
 
-run_ai question do something >/dev/null 2>&1; check "question: exit status" 2 "$?"
-err=$(run_ai question do something 2>&1 >/dev/null)
+run_ai question "do something" >/dev/null 2>&1; check "question: exit status" 2 "$?"
+err=$(run_ai question "do something" 2>&1 >/dev/null)
 check "question: question on stderr" "Which directory should I search?" "$err"
 
-run_ai empty do something >/dev/null 2>&1; check "empty: exit status" 3 "$?"
-run_ai api_error do something >/dev/null 2>&1; check "api_error: exit status" 3 "$?"
-run_ai garbage do something >/dev/null 2>&1; check "garbage: exit status" 3 "$?"
+run_ai empty "do something" >/dev/null 2>&1; check "empty: exit status" 3 "$?"
+run_ai api_error "do something" >/dev/null 2>&1; check "api_error: exit status" 3 "$?"
+run_ai garbage "do something" >/dev/null 2>&1; check "garbage: exit status" 3 "$?"
 
 printf 'usage errors\n'
 printf '' | STUB_CASE=ok PATH="$stub_dir:$PATH" "$root/ai" >/dev/null 2>&1
@@ -91,10 +91,18 @@ esac
 check "unknown option: exit status" 1 "$?"
 
 printf 'wrapper\n'
-"$root/ai" init zsh | { command -v zsh >/dev/null 2>&1 && zsh -n || cat >/dev/null; }
-check "init zsh: parses" 0 "$?"
-"$root/ai" init bash | bash -n
+snippet=$(mktemp)
+if command -v zsh >/dev/null 2>&1; then
+    "$root/ai" init zsh >"$snippet"
+    zsh -n "$snippet"
+    check "init zsh: parses" 0 "$?"
+else
+    printf '  skip init zsh parse (zsh not installed)\n'
+fi
+"$root/ai" init bash >"$snippet"
+bash -n "$snippet"
 check "init bash: parses" 0 "$?"
+rm -f "$snippet"
 "$root/ai" init fish >/dev/null 2>&1
 check "init fish: rejected" 1 "$?"
 
@@ -134,7 +142,7 @@ check "bash: init as first word" "init" "$(complete_bash 'ai in' 1)"
 check "bash: free text not completed" "" "$(complete_bash 'ai find large ' 3)"
 
 printf 'installer\n'
-sandbox=$(mktemp -d)
+sandbox=$(cd -P "$(mktemp -d)" && pwd)
 source_repo="$sandbox/source"
 mkdir -p "$source_repo/tests/stub"
 cp "$root/ai" "$root/install.sh" "$source_repo/"
@@ -174,6 +182,15 @@ check "link: rc block restored" 1 "$(grep -c '>>> ai >>>' "$sandbox/zshrc" 2>/de
 
 env "${install_env[@]}" AI_NO_RC=1 "$sandbox/share/ai/ai" --link >/dev/null 2>&1
 check "link --no-rc: rc untouched" 1 "$(grep -c '>>> ai >>>' "$sandbox/zshrc" 2>/dev/null || echo 0)"
+
+printf 'export BEFORE=1\n' >"$sandbox/zshrc"
+env "${install_env[@]}" "$sandbox/share/ai/ai" --link >/dev/null 2>&1
+printf 'export AFTER=2\n' >>"$sandbox/zshrc"
+env "${install_env[@]}" "$sandbox/share/ai/ai" --link >/dev/null 2>&1
+check "link: rewrite exit status" 0 "$?"
+check "link: line before block kept" 1 "$(grep -c '^export BEFORE=1$' "$sandbox/zshrc" 2>/dev/null || echo 0)"
+check "link: line after block kept" 1 "$(grep -c '^export AFTER=2$' "$sandbox/zshrc" 2>/dev/null || echo 0)"
+check "link: end marker on its own line" 1 "$(grep -c '^# <<< ai <<<$' "$sandbox/zshrc" 2>/dev/null || echo 0)"
 
 cp "$root/ai" "$sandbox/loose-ai"
 env "${install_env[@]}" "$sandbox/loose-ai" --update >/dev/null 2>&1
