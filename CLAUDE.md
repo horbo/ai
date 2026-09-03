@@ -2,79 +2,81 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Czym jest to repozytorium
+## What this repository is
 
-Skrypt `ai` (bash) generujacy komende shellowa na podstawie promptu w jezyku
-naturalnym. Do tego `install.sh` (instalator dla `curl | bash`) i `tests/`.
-Brak systemu budowania i zaleznosci poza `claude`, `jq` i `git`.
+`ai`, a bash script that turns a natural-language request into a shell command,
+plus `install.sh` (the `curl | bash` installer) and `tests/`. No build system and
+no dependencies beyond `claude`, `jq` and `git`.
 
-Repo jest publikowane jako `horbo/ai`, branch glowny `main`.
+Published as `horbo/ai`, main branch `main`.
 
-## Uruchamianie i weryfikacja zmian
+## Running and verifying changes
 
 ```bash
-tests/run.sh                            # PIERWSZY wybor - nie wysyla zapytan do modelu
-./ai lista plikow wiekszych niz 100MB   # realne zapytanie, kosztuje
+tests/run.sh                            # FIRST choice - makes no API calls
+./ai list files larger than 100MB       # a real request, costs money
 bash -n ai && shellcheck ai
 ```
 
-`tests/run.sh` podmienia `claude` na stub w PATH (`tests/stub/claude`, sterowany
-`STUB_CASE`), sprawdza kontrakt stdout/stderr i kody wyjscia, a instalator uruchamia
-end-to-end w `mktemp -d` na tymczasowym repo zbudowanym z drzewa roboczego.
-Zmieniajac parsowanie wyjscia albo instalacje, dopisz przypadek do tego pliku,
-zamiast testowac przez realne wywolania.
+`tests/run.sh` puts a stubbed `claude` on the PATH (`tests/stub/claude`, driven by
+`STUB_CASE`), asserts the stdout/stderr contract and the exit codes, and runs the
+installer end to end in a `mktemp -d` against a throwaway repository built from the
+working tree. When you touch output parsing or installation, add a case there
+instead of testing through real calls.
 
-## Architektura
+## Architecture
 
-Skrypt swiadomie **tylko wypisuje komende na stdout i nigdy jej nie wykonuje**.
-Uruchomieniem zajmuje sie owijka powloki generowana przez `ai init zsh|bash`,
-ktora w zsh wklada wynik do bufora edycji przez `print -z`. Ten podzial jest
-kluczowy - nie dodawaj do skryptu wykonywania (`eval`, `bash -c`) wygenerowanej
-komendy.
+The script deliberately **only prints the command to stdout and never runs it**.
+Running is the job of the shell wrapper emitted by `ai init zsh|bash`, which in zsh
+pushes the result into the editing buffer via `print -z`. This split is the point
+of the tool: never add execution (`eval`, `bash -c`) of the generated command to
+the script.
 
-`init_snippet` emituje owijke **i** completion (zsh `_ai` + `compdef`, bash `_ai`
-+ `complete`). Dodajac flage do parsera argumentow, dopisz ja w obu wariantach -
-testy sprawdzaja tylko kilka reprezentatywnych przypadkow, nie kompletnosc listy.
-W zsh `compdef` istnieje dopiero po `compinit`, stad guard `if (( $+functions[compdef] ))`;
-musi to byc `if`, a nie `&&`, zeby eval nie zostawial `$?` = 1.
+`init_snippet` emits the wrapper **and** the completion function (zsh `_ai` +
+`compdef`, bash `_ai` + `complete`). When you add a flag to the argument parser,
+add it to both variants; the tests cover a few representative cases, not the whole
+list. In zsh `compdef` only exists after `compinit`, hence the
+`if (( $+functions[compdef] ))` guard; it has to be an `if` rather than `&&`, so
+that the eval does not leave `$?` at 1.
 
-Niezmiennik, ktorego pilnuja testy: **na stdout nie trafia nic poza komenda**.
-Pomoc, wersja, wyjasnienia, ostrzezenia, pytania i bledy ida na stderr. Wyjatkiem
-jest `ai init`, ktorego wyjscie jest konsumowane przez `eval`.
+The invariant the tests protect: **nothing but the command reaches stdout**. Help,
+version, explanations, warnings, questions and errors all go to stderr. The one
+exception is `ai init`, whose output is consumed by `eval`.
 
-Kody wyjscia: `0` komenda, `1` blad uzycia lub brak zaleznosci, `2` model prosi
-o doprecyzowanie (pytanie na stderr), `3` awaria CLI `claude`.
+Exit codes: `0` command, `1` usage error or missing dependency, `2` the model wants
+a clarification (question on stderr), `3` the `claude` CLI failed.
 
-Przeplyw: parsowanie flag (konczy sie na pierwszym argumencie niebedacym flaga,
-`--` wymusza koniec) → input z argumentow, stdin lub `read` → `build_context()`
-→ wywolanie `claude` z `--json-schema` i `--output-format json` → `jq` na
-`.is_error`, `.structured_output.question`, `.structured_output.command` → stdout.
+Flow: flag parsing (stops at the first non-flag argument, `--` forces the end) →
+input from arguments, stdin or `read` → `build_context()` → `claude` with
+`--json-schema` and `--output-format json` → `jq` on `.is_error`,
+`.structured_output.question`, `.structured_output.command` → stdout.
 
-Format odpowiedzi kontroluja **dwa** miejsca: `SCHEMA` (structured output wymuszany
-przez CLI) i `SYSTEM_PROMPT` (kiedy uzyc `command`, a kiedy `question`, jezyk
-odpowiedzi). Zmieniajac jedno, sprawdz drugie. `strip_fences` to juz tylko pas
-bezpieczenstwa na wypadek, gdyby model wsadzil markdown do pola `command`.
+Two places control the response format: `SCHEMA` (structured output enforced by the
+CLI) and `SYSTEM_PROMPT` (when to use `command` versus `question`, and the response
+language). Change one, check the other. `strip_fences` is now only a safety net in
+case the model puts markdown inside the `command` field.
 
-Wywolanie `claude` jest zahardenowane: `--tools ""`, `--permission-mode dontAsk`,
+The `claude` invocation is hardened: `--tools ""`, `--permission-mode dontAsk`,
 `--permission-prompts none`, `--setting-sources ""`, `--strict-mcp-config`,
-`--no-session-persistence`. To odcina narzedzia, `CLAUDE.md` z cwd, hooki i MCP,
-i jest zauwazalnie szybsze. Nie uzywaj `--bare` - wymaga `ANTHROPIC_API_KEY`
-i nie czyta OAuth.
+`--no-session-persistence`. That cuts off tools, the `CLAUDE.md` of the working
+directory, hooks and MCP servers, and is noticeably faster. Do not use `--bare`: it
+requires `ANTHROPIC_API_KEY` and never reads OAuth credentials.
 
-Wywolanie `claude` nie moze stac bezposrednio pod `set -e` (`response=$(...) || status=$?`),
-bo CLI zwraca niezerowy kod przy bledzie API, a chcemy wtedy wypisac tresc z `.result`.
+The `claude` call cannot sit directly under `set -e`
+(`response=$(...) || status=$?`), because the CLI exits non-zero on an API error
+and we still want to print the message from `.result`.
 
-Logika instalacji zyje **w `ai`** (`link_binary`, `ensure_rc_block`, podkomenda
-`--link`); `install.sh` po sklonowaniu repo tylko wola `ai --link`. Nie duplikuj
-tam sed-ow ani znacznikow. Dzieki temu `ai --update` naprawia zepsuty symlink
-i brakujacy wpis w rc.
+Installation logic lives **in `ai`** (`link_binary`, `ensure_rc_block`, the `--link`
+subcommand); after cloning, `install.sh` merely calls `ai --link`. Do not duplicate
+the sed work or the markers there. This is what lets `ai --update` repair a broken
+symlink and a missing rc entry.
 
-## Konwencje
+## Conventions
 
-- **Wszystko w repozytorium po angielsku**: kod, nazwy, komunikaty dla uzytkownika,
-  tekst `--help`, system prompt, README, testy, komunikaty commitow.
-- **Komentarze do absolutnego minimum, najlepiej zero.** Zamiast komentarza -
-  czytelna nazwa funkcji lub zmiennej. Jedna linia wyjasnienia tylko tam, gdzie kod
-  robi cos nieoczywistego wbrew pozorom.
-- `set -euo pipefail` na gorze kazdego skryptu; trzymaj sie tego przy dodawaniu kodu.
-- Komunikaty na stderr z prefiksem `ai:` (helpery `log` i `die`).
+- **Everything in the repository is in English**: code, names, user-facing messages,
+  `--help` text, the system prompt, README, tests, commit messages, and this file.
+- **Comments kept to an absolute minimum, ideally none.** Prefer a clear function or
+  variable name over a comment. A single explanatory line only where the code does
+  something that looks wrong but is not.
+- `set -euo pipefail` at the top of every script; keep it that way when adding code.
+- Messages go to stderr with an `ai:` prefix (the `log` and `die` helpers).
