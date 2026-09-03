@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# ai - generuje komende bash na podstawie promptu uzytkownika (model haiku).
+# Wypisuje SAMA komende na stdout, nie uruchamia jej. Owijka w .zshrc (funkcja
+# `ai`) wstawia ja do bufora edycji zsh przez `print -z`, gdzie mozesz ja
+# przejrzec, edytowac i uruchomic Enterem.
+
+set -euo pipefail
+
+# Zbierz input uzytkownika z argumentow lub interaktywnie.
+if [[ $# -gt 0 ]]; then
+    input="$*"
+else
+    read -r -p "Co chcesz zrobic? " input
+fi
+
+if [[ -z "${input// }" ]]; then
+    echo "Brak promptu." >&2
+    exit 1
+fi
+
+system_prompt="Jestes generatorem komend bash. Na podstawie promptu uzytkownika zwracasz JEDNA gotowa komende do uruchomienia. Odpowiadasz wylacznie sama komenda - zadnego dodatkowego tekstu, komentarzy, wyjasnien ani pytan. Nie zadawaj pytan doprecyzowujacych - jesli czegos brakuje, przyjmij rozsadne zalozenie. Nie opakowuj komendy w markdown ani backticki. Nie uruchamiasz zadnych komend samodzielnie - tylko je generujesz, wiec nie potrzebujesz zadnych uprawnien ani narzedzi; komende wykona uzytkownik."
+
+# Zapytaj Claude o komende.
+command_output="$(claude --model haiku --system-prompt "${system_prompt}" -p "${input}")"
+
+# Usun ewentualne opakowanie w markdown (``` lub ```bash), gdyby model je dodal.
+# Wycina linie zaczynajace sie od ``` oraz puste linie z poczatku i konca.
+command_output="$(printf '%s\n' "${command_output}" \
+    | sed -e '/^[[:space:]]*```/d' \
+    | sed -e '/./,$!d' -e ':a' -e '/^\n*$/{$d;N;ba' -e '}')"
+
+if [[ -z "${command_output// }" ]]; then
+    echo "Claude nie zwrocil zadnej komendy." >&2
+    exit 1
+fi
+
+# Wypisz sama komende na stdout - reszte (wstawienie do terminala) robi owijka w .zshrc.
+printf '%s\n' "${command_output}"
